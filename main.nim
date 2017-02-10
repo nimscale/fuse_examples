@@ -125,6 +125,11 @@ proc create(fs: FS, req: Request) {.async} =
 
   await fs.conn.respondToCreate(req, attr.ino.NodeId, fd.uint64, attr)
 
+proc writeHandler(fs: FS, req: Request) {.async} =
+  discard lseek(req.fileHandle.cint, req.writeOffset.Off, SEEK_SET)
+  let written = posix.write(req.fileHandle.cint, req.writeData.pointer, req.writeData.len)
+  await fs.conn.respondToWrite(req, written.uint32)
+
 proc loop(fs: FS) {.async} =
   let conn = await mount(fs.mountPoint, ())
   fs.conn = conn
@@ -150,6 +155,8 @@ proc loop(fs: FS) {.async} =
       await fs.lookup(req)
     of fuseCreate:
       await fs.create(req)
+    of fuseWrite:
+      await fs.writeHandler(req)
     else:
       echo("unknown message kind:", req.kind)
       await conn.respondError(req, ENOSYS)
