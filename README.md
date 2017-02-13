@@ -1,5 +1,22 @@
 # passthroughfs
 
+## implemented syscall
+
+- getattr
+- open
+- read
+- readdir
+- mkdir
+- lookup
+- create
+- write
+- release
+
+## TODO
+
+- other syscalls
+- mount dir and backend/source dir still hardcoded
+
 ## test it
 
 Create mount directory
