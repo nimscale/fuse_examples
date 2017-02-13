@@ -96,6 +96,21 @@ proc readDirectory(fs: FS, req: Request) {.async} =
   discard closedir(dir)
   await fs.conn.respondToReadAll(req, buf)
 
+proc mkdirHandler(fs: FS, req: Request) {.async} =
+  # FUSE_MKDIR handler
+  let (path, _) = fs.getPathFromInodePath(req.nodeId, req.mkdirName)
+  let mode = req.mkdirMode and (not req.mkdirUmask) and 0777
+  
+  discard mkdir(path.cstring, mode.cint)
+ 
+  # get attr
+  let (attr, ok) = fs.doGetAttr(path, 0)
+  if not ok:
+    await fs.conn.respondError(req, posix.EIO)
+    return
+ 
+  await fs.conn.respondToMkdir(req, attr.ino, attr)
+  
 proc lookup(fs: FS, req: Request) {.async} =
   # FUSE_LOOKUP handler
 
@@ -171,7 +186,7 @@ proc openFile(fs: FS, req: Request) {.async} =
   let (path, _) = fs.getPath(req.nodeId)
   let fd = open(path.cstring, req.flags.cint)
   if fd < 0:
-    await fs.conn.respondError(req, ENOENT)
+    await fs.conn.respondError(req, posix.EIO)
     return
 
   # register
@@ -220,6 +235,8 @@ proc loop(fs: FS) {.async} =
       await fs.writeHandler(req)
     of fuseRelease:
       await fs.releaseFile(req)
+    of fuseMkdir:
+      await fs.mkdirHandler(req)
     else:
       echo("unknown message kind:", req.kind)
       await conn.respondError(req, ENOSYS)
