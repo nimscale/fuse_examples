@@ -27,20 +27,34 @@ proc newFS(mountPoint, backend: string): FS =
   result.inodePathTab[1] = backend
 
 proc getPath(fs: FS, nodeId: NodeId): tuple[path: string, exists: bool] =
+  # get complete path of an inode number
   if not fs.inodePathTab.hasKey(nodeId):
     return ("", false)
   
   return (fs.inodePathTab[nodeId], true)
 
 proc getPathFromInodePath(fs: FS, nodeId: NodeId, path: string): tuple[path: string, exists: bool] =
-   # check parent inode/path
+   # get complete from given inode of parent and path of children
   let (parentPath, exists) = fs.getPath(nodeId)
   if not exists:
     return ("", false)
 
   return (joinPath(parentPath, path), true)
 
+proc addPath(fs: FS, nodeId: NodeId, path: string) =
+  # add path with give inode id to FS metadata
+
+  # handle hardlink
+  # one inode may map to multiple paths
+  if not fs.inodePathTab.hasKey(nodeId):
+    fs.inodePathTab[nodeId] = path
+    return
+
+  fs.inodePathTab[nodeId] = path
+
+
 proc doGetAttr(fs: FS, path: string="", nodeId: NodeId=0, fd:cint=0 ): tuple[attr:Attributes, ok: bool] =
+  # get attribute of a file or dir
   var st: Stat
   let ret = if fd == 0: lstat(path, st) else: fstat(fd, st)
   if ret != 0:
@@ -99,16 +113,16 @@ proc readDirectory(fs: FS, req: Request) {.async} =
 proc mkdirHandler(fs: FS, req: Request) {.async} =
   # FUSE_MKDIR handler
   let (path, _) = fs.getPathFromInodePath(req.nodeId, req.mkdirName)
-  let mode = req.mkdirMode and (not req.mkdirUmask) and 0777
-  
-  discard mkdir(path.cstring, mode.cint)
+  discard mkdir(path.cstring, req.mkdirMode.cint)
+  discard chown(path.cstring, req.uid.Uid, req.gid.Gid)
  
   # get attr
   let (attr, ok) = fs.doGetAttr(path, 0)
   if not ok:
     await fs.conn.respondError(req, posix.EIO)
     return
- 
+
+  fs.addPath(attr.ino, path)
   await fs.conn.respondToMkdir(req, attr.ino, attr)
   
 proc lookup(fs: FS, req: Request) {.async} =
@@ -126,6 +140,9 @@ proc lookup(fs: FS, req: Request) {.async} =
     await fs.conn.respondError(req, ENOENT)
     return
 
+  if req.lookupName != "." and req.lookupName != "..":
+    fs.addPath(attr.ino, path)
+
   await fs.conn.respondToLookup(req, attr.ino, attr)
 
 proc create(fs: FS, req: Request) {.async} =
@@ -140,7 +157,7 @@ proc create(fs: FS, req: Request) {.async} =
 
   let (attr, _) = fs.doGetAttr(fd=fd)
   # add metadata
-  fs.inodePathTab[attr.ino.NodeId] = path
+  fs.addPath(attr.ino, path)
   fs.inodeFdTab[attr.ino.NodeId] = fd.uint64
   fs.fdInodeTab[fd.uint64] = attr.ino.NodeId
   fs.fdOpenCountTab[fd.uint64] = 1
