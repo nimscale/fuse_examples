@@ -13,16 +13,20 @@ mkdir /root/backend
 ```
 backend dir must be empty
 
+Run it
+```
+nim c -r main.nim
+```
+
 Write something to mounted dir
 ```
 echo "hallo" > /mnt/rf/hello.txt
 ```
 
-Verify the file exist in mounted dir
+Verify the file exist in mounted dir and read it
 ```
 ls /mnt/rf
-
-# read support will follow
+cat /mnt/rf/hello.tx
 ```
 
 Verify the file exist in backend dir and content is valid

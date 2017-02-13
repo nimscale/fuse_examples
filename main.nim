@@ -1,16 +1,17 @@
 import posix, tables, os, times
 
 import reactor/async
-include reactorfuse
+import reactorfuse/raw
+import reactorfuse/fuse_kernel
 
 type
   FS = ref object
     mountPoint: string
     backend: string
     inodePathTab: Table[NodeId, string]
-    fdInodeTab: Table[cint,NodeId]
-    inodeFdTab: Table[NodeId, cint]
-    fdOpenCountTab: Table[cint, int]
+    fdInodeTab: Table[uint64,NodeId]
+    inodeFdTab: Table[NodeId, uint64]
+    fdOpenCountTab: Table[uint64, int]
     conn: FuseConnection
 
 proc newFS(mountPoint, backend: string): FS =
@@ -18,9 +19,9 @@ proc newFS(mountPoint, backend: string): FS =
     mountPoint: mountPoint,
     backend: backend,
     inodePathTab: initTable[NodeId, string](),
-    inodeFdTab: initTable[NodeId, cint](),
-    fdInodeTab: initTable[cint, NodeId](),
-    fdOpenCountTab: initTable[cint, int]()
+    inodeFdTab: initTable[NodeId, uint64](),
+    fdInodeTab: initTable[uint64, NodeId](),
+    fdOpenCountTab: initTable[uint64, int]()
     )
 
   result.inodePathTab[1] = backend
@@ -73,9 +74,11 @@ proc getAttr(fs: FS, req: Request) {.async} =
   await fs.conn.respondToGetAttr(req, attr)
  
 proc openDirectory(fs: FS, req: Request) {.async} =
+  # FUSE_OPENDIR
   await fs.conn.respondToOpen(req, req.nodeId)
 
 proc readDirectory(fs: FS, req: Request) {.async} =
+  # FUSE_READDIR
   let (path, exists) = fs.getPath(req.nodeId)
   if not exists:
     await fs.conn.respondError(req, ENOENT)
@@ -94,6 +97,8 @@ proc readDirectory(fs: FS, req: Request) {.async} =
   await fs.conn.respondToReadAll(req, buf)
 
 proc lookup(fs: FS, req: Request) {.async} =
+  # FUSE_LOOKUP handler
+
   # get lookup path
   let (path, exists) = fs.getPathFromInodePath(req.nodeId, req.lookupName)
   if not exists:
@@ -109,26 +114,82 @@ proc lookup(fs: FS, req: Request) {.async} =
   await fs.conn.respondToLookup(req, attr.ino, attr)
 
 proc create(fs: FS, req: Request) {.async} =
+  # FUSE_CREATE handler
   let (path, parentExists) = fs.getPathFromInodePath(req.nodeId, req.createName)
   if not parentExists:
     await fs.conn.respondError(req, ENOENT)
     return
 
+  # open the file
   let fd = posix.open(path, req.createFlags.cint or O_CREAT or O_TRUNC)
 
   let (attr, _) = fs.doGetAttr(fd=fd)
   # add metadata
   fs.inodePathTab[attr.ino.NodeId] = path
-  fs.inodeFdTab[attr.ino.NodeId] = fd
-  fs.fdInodeTab[fd] = attr.ino.NodeId
-  fs.fdOpenCountTab[fd] = 1
+  fs.inodeFdTab[attr.ino.NodeId] = fd.uint64
+  fs.fdInodeTab[fd.uint64] = attr.ino.NodeId
+  fs.fdOpenCountTab[fd.uint64] = 1
 
   await fs.conn.respondToCreate(req, attr.ino.NodeId, fd.uint64, attr)
 
 proc writeHandler(fs: FS, req: Request) {.async} =
+  # FUSE_WRITE handler
   discard lseek(req.fileHandle.cint, req.writeOffset.Off, SEEK_SET)
   let written = posix.write(req.fileHandle.cint, req.writeData.pointer, req.writeData.len)
   await fs.conn.respondToWrite(req, written.uint32)
+
+proc releaseFile(fs: FS, req: Request) {.async} =
+  # FUSE_RELEASE handler
+  if not fs.fdOpenCountTab.hasKey(req.fileHandle):
+    return
+
+  if fs.fdOpenCountTab[req.fileHandle] > 1:
+    fs.fdOpenCountTab[req.fileHandle] -= 1
+    return
+
+  # if not opened anymore, delete from table
+  fs.fdOpenCountTab.del(req.fileHandle)
+  fs.inodeFdTab.del(req.nodeId)
+  fs.fdInodeTab.del(req.fileHandle)
+  discard close(req.fileHandle.cint)
+    
+
+proc openFile(fs: FS, req: Request) {.async} =
+  # FUSE_OPEN handler
+  
+  if fs.inodeFdTab.hasKey(req.nodeId):
+    # already opened
+    let fd = fs.inodeFdTab[req.nodeId]
+    fs.fdOpenCountTab[fd] += 1
+    await fs.conn.respondToOpen(req, fd)
+    return
+
+  # make sure it has O_CREAT in flags
+  #assert req.flags and O_CREAT == 0
+
+  # open the file
+  let (path, _) = fs.getPath(req.nodeId)
+  let fd = open(path.cstring, req.flags.cint)
+  if fd < 0:
+    await fs.conn.respondError(req, ENOENT)
+    return
+
+  # register
+  fs.inodeFdTab[req.nodeId] = fd.uint64
+  fs.fdInodeTab[fd.uint64] = req.nodeId
+  fs.fdOpenCountTab[fd.uint64] = 1
+
+  await fs.conn.respondToOpen(req, fd.uint64)
+
+proc readFileHandler(fs: FS, req: Request) {.async} =
+  # FUSE_READ handler
+
+  # seek and read
+  var buf = newString(req.size)
+  discard lseek(req.fileHandle.cint, req.offset.Off, SEEK_SET)
+  discard posix.read(req.fileHandle.cint, buf.cstring.pointer, req.size.int)
+
+  await fs.conn.respondToRead(req, buf)
 
 proc loop(fs: FS) {.async} =
   let conn = await mount(fs.mountPoint, ())
@@ -145,18 +206,20 @@ proc loop(fs: FS) {.async} =
       if req.isDir:
         await fs.openDirectory(req)
       else:
-        echo("********* fuseOpen file *********")
+        await fs.openFile(req)
     of fuseRead:
       if req.isDir:
         await fs.readDirectory(req)
       else:
-        echo("********* fuseRead file **********")
+        await fs.readFileHandler(req)
     of fuseLookup:
       await fs.lookup(req)
     of fuseCreate:
       await fs.create(req)
     of fuseWrite:
       await fs.writeHandler(req)
+    of fuseRelease:
+      await fs.releaseFile(req)
     else:
       echo("unknown message kind:", req.kind)
       await conn.respondError(req, ENOSYS)
