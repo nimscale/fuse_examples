@@ -26,20 +26,19 @@ proc newFS(mountPoint, backend: string): FS =
 
   result.inodePathTab[1] = backend
 
-proc getPath(fs: FS, nodeId: NodeId): tuple[path: string, exists: bool] =
-  # get complete path of an inode number
+template checkInode(fs: FS, nodeId: NodeId) =
+  # check inode id exists
   if not fs.inodePathTab.hasKey(nodeId):
-    return ("", false)
-  
-  return (fs.inodePathTab[nodeId], true)
+    await fs.conn.respondError(req, ENOENT)
+    return
 
-proc getPathFromInodePath(fs: FS, nodeId: NodeId, path: string): tuple[path: string, exists: bool] =
-   # get complete from given inode of parent and path of children
-  let (parentPath, exists) = fs.getPath(nodeId)
-  if not exists:
-    return ("", false)
+proc getPath(fs: FS, nodeId: NodeId): string =
+  return fs.inodePathTab[nodeId]
 
-  return (joinPath(parentPath, path), true)
+proc getPathFromInodePath(fs: FS, nodeId: NodeId, path: string): string =
+  let parentPath = fs.getPath(nodeId)
+
+  return joinPath(parentPath, path)
 
 proc addPath(fs: FS, nodeId: NodeId, path: string) =
   # add path with give inode id to FS metadata
@@ -79,10 +78,8 @@ proc doGetAttr(fs: FS, path: string="", nodeId: NodeId=0, fd:cint=0 ): tuple[att
   return (attr, true)
 
 proc getAttr(fs: FS, req: Request) {.async} =
-  let (path, exists) = fs.getPath(req.nodeId)
-  if not exists:
-    await fs.conn.respondError(req, ENOENT)
-    return
+  fs.checkInode(req.nodeId)
+  let path = fs.getPath(req.nodeId)
 
   let (attr, _) = fs.doGetAttr(path, req.nodeId)
   await fs.conn.respondToGetAttr(req, attr)
@@ -93,10 +90,8 @@ proc openDirectory(fs: FS, req: Request) {.async} =
 
 proc readDirectory(fs: FS, req: Request) {.async} =
   # FUSE_READDIR
-  let (path, exists) = fs.getPath(req.nodeId)
-  if not exists:
-    await fs.conn.respondError(req, ENOENT)
-    return
+  fs.checkInode(req.nodeId)
+  let path = fs.getPath(req.nodeId)
 
   var buf = ""
   let dir = opendir(path)
@@ -112,7 +107,8 @@ proc readDirectory(fs: FS, req: Request) {.async} =
 
 proc mkdirHandler(fs: FS, req: Request) {.async} =
   # FUSE_MKDIR handler
-  let (path, _) = fs.getPathFromInodePath(req.nodeId, req.mkdirName)
+  fs.checkInode(req.nodeId)
+  let path = fs.getPathFromInodePath(req.nodeId, req.mkdirName)
   discard mkdir(path.cstring, req.mkdirMode.cint)
   discard chown(path.cstring, req.uid.Uid, req.gid.Gid)
  
@@ -127,12 +123,10 @@ proc mkdirHandler(fs: FS, req: Request) {.async} =
   
 proc lookup(fs: FS, req: Request) {.async} =
   # FUSE_LOOKUP handler
+  fs.checkInode(req.nodeId)
 
   # get lookup path
-  let (path, exists) = fs.getPathFromInodePath(req.nodeId, req.lookupName)
-  if not exists:
-    await fs.conn.respondError(req, ENOENT)
-    return
+  let path = fs.getPathFromInodePath(req.nodeId, req.lookupName)
 
   # get attr
   let (attr, ok) = fs.doGetAttr(path, 0)
@@ -147,10 +141,9 @@ proc lookup(fs: FS, req: Request) {.async} =
 
 proc create(fs: FS, req: Request) {.async} =
   # FUSE_CREATE handler
-  let (path, parentExists) = fs.getPathFromInodePath(req.nodeId, req.createName)
-  if not parentExists:
-    await fs.conn.respondError(req, ENOENT)
-    return
+  fs.checkInode(req.nodeId)
+  
+  let path = fs.getPathFromInodePath(req.nodeId, req.createName)
 
   # open the file
   let fd = posix.open(path, req.createFlags.cint or O_CREAT or O_TRUNC)
@@ -200,7 +193,7 @@ proc openFile(fs: FS, req: Request) {.async} =
   #assert req.flags and O_CREAT == 0
 
   # open the file
-  let (path, _) = fs.getPath(req.nodeId)
+  let path = fs.getPath(req.nodeId)
   let fd = open(path.cstring, req.flags.cint)
   if fd < 0:
     await fs.conn.respondError(req, posix.EIO)
