@@ -32,7 +32,7 @@ backend dir must be empty
 
 Run it
 ```
-nim c -r main.nim
+nim c -r passthroughfs.nim
 ```
 
 Write something to mounted dir
