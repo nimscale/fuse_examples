@@ -29,6 +29,7 @@ proc newBuf(): Buf =
     size: 0,
     pos: 0
     )
+
 proc extend*(buf: Buf, size: int) =
   if (buf.size >= size):
       return
@@ -54,6 +55,7 @@ proc toString(buf: Buf, offset, size: int): string =
   for ch in data:
     result.add(ch)
   
+  result.setLen(size)
 proc initDir(nodeId: NodeId): Inode =
   var attr = Attributes(
     ino: nodeId,
@@ -178,18 +180,18 @@ proc writeHandler(fs: FS, req: Request) {.async} =
   var inode = fs.inodes[req.nodeId]
   inode.content.writeBuf(req.writeData, req.writeOffset.int, req.writeData.len)
   
+  # update attributes
+  inode.attr.size = inode.content.size.uint64
+  
   await fs.conn.respondToWrite(req, req.writeData.len.uint32)
 
 proc readHandler(fs: FS, req: Request) {.async} =
   fs.checkInode(req.nodeId)
 
   let inode = fs.inodes[req.nodeId]
-  let str = inode.content.toString(req.offset.int, req.size.int)
-  
-  echo("readHandler....str=", str)
-  
+  var str = inode.content.toString(req.offset.int, req.size.int)
   await fs.conn.respondToRead(req, str)
-
+  
 proc loop(fs: FS) {.async} =
   let conn = await mount(fs.mountPoint, ())
   fs.conn = conn
@@ -205,7 +207,6 @@ proc loop(fs: FS) {.async} =
       if req.isDir:
         await fs.openDirectory(req)
       else:
-        #await fs.openFile(req)
         await conn.respondError(req, ENOSYS)
     of fuseRead:
       if req.isDir:
