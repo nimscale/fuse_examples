@@ -1,4 +1,4 @@
-# passthroughfs
+# memfs
 
 ## implemented syscall
 
