@@ -56,11 +56,14 @@ proc toString(buf: Buf, offset, size: int): string =
     result.add(ch)
   
   result.setLen(size)
-proc initDir(nodeId: NodeId): Inode =
+
+proc initDir(nodeId: NodeId, mode: uint32 = cast [uint32](S_IFDIR or 0o755), gid, uid:uint32 = 0): Inode =
   var attr = Attributes(
     ino: nodeId,
     size: 4096,
-    mode: cast [uint32](S_IFDIR or 0755),
+    mode: mode,
+    gid: gid,
+    uid: uid,
     nlink: 0
     )
 
@@ -106,6 +109,21 @@ proc openDirectory(fs: FS, req: Request) {.async} =
   # opendir handler
   fs.checkInode(req.nodeId)
   await fs.conn.respondToOpen(req, req.nodeId)
+
+proc mkdirHandler(fs: FS, req: Request) {.async} =
+  fs.checkInode(req.nodeId)
+  var parent = fs.inodes[req.nodeId]
+
+  # check if same dir/file already exist
+  if parent.children.hasKey(req.mkdirName):
+    await fs.conn.respondError(req, EEXIST)
+    return
+
+  let dir = initDir(fs.getNewId(), S_IFDIR.uint32 or req.mkdirMode, req.gid, req.uid)
+  fs.inodes[dir.attr.ino] = dir
+  parent.children[req.mkdirName] = dir.attr.ino
+  
+  await fs.conn.respondToMkdir(req, dir.attr.ino, dir.attr)
 
 proc readDirectory(fs: FS, req: Request) {.async} =
   # readdir handler
@@ -219,6 +237,8 @@ proc loop(fs: FS) {.async} =
       await fs.writeHandler(req)
     of fuseLookup:
       await fs.lookup(req)
+    of fuseMkdir:
+      await fs.mkdirHandler(req)
     else:
       echo("unknown message kind:", req.kind)
       await conn.respondError(req, ENOSYS)
